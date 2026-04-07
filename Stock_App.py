@@ -174,87 +174,79 @@ def plot_candlestick(df, stock_name):
 st.set_page_config(layout="wide")
 st.title("📈 量化交易終端機 - 智能評估版")
 
-col1, col2 = st.columns(2)
-with col1:
-    user_input = st.text_input("輸入股票名稱或代碼", "台積電")
-with col2:
-    target_date = st.text_input("輸入查詢年月 (YYYYMMDD)", "20260401")
-
-# 建立兩個並排的執行按鈕
-btn_col1, btn_col2 = st.columns(2)
-with btn_col1:
-    run_analysis = st.button("📊 執行單檔智能分析", use_container_width=True)
-with btn_col2:
-    run_scan = st.button("🚀 一鍵掃描底部爆量股", use_container_width=True)
+# 【核心修改】建立兩個標籤頁來區分功能，避免狀態重置
+tab1, tab2 = st.tabs(["📊 單檔智能分析", "🚀 板塊爆量掃描"])
 
 # ==========================================
-# 模式一：單檔智能分析
+# 標籤頁一：單檔智能分析
 # ==========================================
-if run_analysis:
-    with st.spinner('正在截獲數據並進行運算...'):
-        stock_code = get_stock_code(user_input)
-        if stock_code:
-            time.sleep(1) 
-            raw_df = fetch_twse_data(stock_code, target_date)
-            
-            if raw_df is not None:
-                analyzed_df = process_and_analyze(raw_df.copy())
-                
-                report_md, alert_color = generate_trend_report(analyzed_df)
-                if alert_color == "success": st.success(report_md)
-                elif alert_color == "error": st.error(report_md)
-                elif alert_color == "warning": st.warning(report_md)
-                else: st.info(report_md)
+with tab1:
+    col1, col2 = st.columns(2)
+    with col1:
+        user_input = st.text_input("輸入股票名稱或代碼", "台積電")
+    with col2:
+        target_date = st.text_input("輸入查詢年月 (YYYYMMDD)", "20260401")
 
-                chart = plot_candlestick(analyzed_df, user_input)
-                st.plotly_chart(chart, use_container_width=True)
+    if st.button("執行單檔智能分析", use_container_width=True):
+        with st.spinner('正在截獲數據並進行運算...'):
+            stock_code = get_stock_code(user_input)
+            if stock_code:
+                time.sleep(1) 
+                raw_df = fetch_twse_data(stock_code, target_date)
                 
-                analyzed_df = analyzed_df.sort_values(by='日期', ascending=False)
-                st.dataframe(analyzed_df, use_container_width=True) 
+                if raw_df is not None:
+                    analyzed_df = process_and_analyze(raw_df.copy())
+                    
+                    report_md, alert_color = generate_trend_report(analyzed_df)
+                    if alert_color == "success": st.success(report_md)
+                    elif alert_color == "error": st.error(report_md)
+                    elif alert_color == "warning": st.warning(report_md)
+                    else: st.info(report_md)
+
+                    chart = plot_candlestick(analyzed_df, user_input)
+                    st.plotly_chart(chart, use_container_width=True)
+                    
+                    analyzed_df = analyzed_df.sort_values(by='日期', ascending=False)
+                    st.dataframe(analyzed_df, use_container_width=True) 
+                else:
+                    st.error("查無數據，請確認該標的近期是否有交易。")
             else:
-                st.error("查無數據，請確認該標的近期是否有交易。")
-        else:
-            st.error("找不到該股票，請確認名稱是否正確。")
+                st.error("找不到該股票，請確認名稱是否正確。")
 
 # ==========================================
-# 模式二：全自動板塊掃描引擎 (API 動態更新版)
+# 標籤頁二：全自動板塊掃描引擎 (API 動態更新版)
 # ==========================================
-if run_scan:
+with tab2:
     st.markdown("### 🔍 產業板塊掃描器")
     
-    # 1. 呼叫 API 獲取即時的分類字典 (會自動使用快取)
+    # 呼叫 API 獲取即時分類
     INDUSTRY_STOCKS = get_industry_mapping()
     
     if not INDUSTRY_STOCKS:
         st.warning("目前無法從 API 獲取產業分類，請稍後再試。")
     else:
-        # 2. 將 API 獲取的產業名稱放入下拉選單
+        # 下拉選單現在位於 tab 內，切換時不會導致整個區塊消失
         selected_industry = st.selectbox("請選擇要掃描的資金板塊：", list(INDUSTRY_STOCKS.keys()))
-        
-        # 顯示該板塊的標的數量
         stock_count = len(INDUSTRY_STOCKS[selected_industry])
         st.caption(f"該板塊目前共收錄 {stock_count} 檔標的")
         
-        # 3. 執行批次掃描
-        if st.button(f"🚀 開始掃描【{selected_industry}】"):
-            with st.spinner(f'正在調閱 {stock_count} 檔標的之歷史籌碼與價格型態 (板塊較大時約需 10~30 秒)...'):
+        # 執行批次掃描的獨立按鈕
+        if st.button(f"🚀 開始掃描【{selected_industry}】", use_container_width=True):
+            with st.spinner(f'正在調閱 {stock_count} 檔標的之歷史籌碼與價格型態...'):
                 
                 watch_list = INDUSTRY_STOCKS[selected_industry]
                 tickers = [f"{code}.TW" for code in watch_list]
 
                 try:
-                    # yfinance 批次下載該板塊所有股票
                     data = yf.download(tickers, period="1mo", group_by='ticker', progress=False)
                     
                     results = []
                     for code in watch_list:
                         ticker_tw = f"{code}.TW"
                         
-                        # 防呆處理：確保 yfinance 真的有抓到該檔股票的資料
                         if len(watch_list) == 1:
                             df = data.copy()
                         else:
-                            # 檢查多層欄位中是否包含此代碼
                             if ticker_tw not in data.columns.get_level_values(0).unique():
                                 continue
                             df = data[ticker_tw].copy()
@@ -267,7 +259,6 @@ if run_scan:
                         latest_vol = float(df['Volume'].iloc[-1])
                         avg_vol_5d = float(df['Volume'].iloc[-6:-1].mean())
 
-                        # 策略邏輯：底部(距20日低點5%內) 且 爆量(大於5日均量2倍)
                         is_low_price = latest_close <= (lowest_20d * 1.05)
                         is_high_vol = latest_vol > (avg_vol_5d * 2) if avg_vol_5d > 0 else False
 
@@ -288,84 +279,3 @@ if run_scan:
 
                 except Exception as e:
                     st.error(f"掃描引擎發生異常: {e}")
-    with st.spinner('啟動量化掃描引擎，正在運算市場籌碼與價格型態 (約需10秒)...'):
-        # 示範觀察池：你可以隨時在這裡加入你想監控的股票代碼
-        watch_list = ["2330", "2317", "2454", "2382", "3231", "2603", "2609", "1519", "1605", "2356", "3481", "2409", "2303", "2881", "2882"]
-        tickers = [f"{code}.TW" for code in watch_list]
-
-        try:
-            # 使用 yfinance 批次下載近一個月數據，大幅提升抓取速度
-            data = yf.download(tickers, period="1mo", group_by='ticker', progress=False)
-            
-            results = []
-            for code in watch_list:
-                ticker_tw = f"{code}.TW"
-                
-                # 提取單檔股票資料
-                df = data[ticker_tw].copy() if len(watch_list) > 1 else data.copy()
-                df = df.dropna()
-                
-                if len(df) < 20: 
-                    continue # 資料不足 20 天無法判斷基準，跳過
-
-                # 提取量化運算所需變數
-                latest_close = float(df['Close'].iloc[-1])
-                lowest_20d = float(df['Low'].rolling(window=20).min().iloc[-1])
-                
-                latest_vol = float(df['Volume'].iloc[-1])
-                # 計算前五日均量 (不包含今日，避免今日爆量拉高均線)
-                avg_vol_5d = float(df['Volume'].iloc[-6:-1].mean())
-
-                # ==========================================
-                # 核心策略邏輯設定
-                # 1. 價格條件：今日收盤價距離近 20 日最低點不超過 5% (仍在底部區間)
-                is_low_price = latest_close <= (lowest_20d * 1.05)
-                # 2. 籌碼條件：今日成交量大於前 5 日平均成交量的 2 倍以上 (爆量)
-                is_high_vol = latest_vol > (avg_vol_5d * 2) if avg_vol_5d > 0 else False
-                # ==========================================
-
-                if is_low_price and is_high_vol:
-                    results.append({
-                        "股票代碼": code,
-                        "最新收盤價": round(latest_close, 2),
-                        "20日最低價": round(lowest_20d, 2),
-                        "今日成交量": f"{int(latest_vol):,}",
-                        "突破爆量倍數": f"{round(latest_vol / avg_vol_5d, 1)} 倍"
-                    })
-
-            # 渲染掃描結果
-            if results:
-                st.success(f"🎯 掃描完成！在觀察池中發現 {len(results)} 檔符合『底部出量』型態的潛力標的：")
-                result_df = pd.DataFrame(results)
-                st.dataframe(result_df, use_container_width=True)
-            else:
-                st.info("平靜無波。目前觀察池內的標的，皆未出現底部爆量訊號。建議保留現金等待時機。")
-
-        except Exception as e:
-            st.error(f"掃描引擎發生異常: {e}")
-    with st.spinner('正在截獲數據並進行運算...'):
-        stock_code = get_stock_code(user_input)
-        if stock_code:
-            time.sleep(1) 
-            raw_df = fetch_twse_data(stock_code, target_date)
-            
-            if raw_df is not None:
-                analyzed_df = process_and_analyze(raw_df.copy())
-                
-                # --- 【新增】渲染評語與報告 ---
-                report_md, alert_color = generate_trend_report(analyzed_df)
-                if alert_color == "success": st.success(report_md)
-                elif alert_color == "error": st.error(report_md)
-                elif alert_color == "warning": st.warning(report_md)
-                else: st.info(report_md)
-                # -----------------------------
-
-                chart = plot_candlestick(analyzed_df, user_input)
-                st.plotly_chart(chart, use_container_width=True)
-                
-                analyzed_df = analyzed_df.sort_values(by='日期', ascending=False)
-                st.dataframe(analyzed_df, use_container_width=True) 
-            else:
-                st.error("查無數據，請確認日期格式或該月是否已開盤。")
-        else:
-            st.error("在上市名單中找不到該股票，請確認名稱是否正確。")

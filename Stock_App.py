@@ -6,14 +6,30 @@ import plotly.graph_objects as go
 import yfinance as yf
 
 def get_stock_code(stock_input):
-    if stock_input.isdigit(): return stock_input
-    url = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
+    """
+    【引擎升級】改用 FinMind 開放金融 API，徹底繞過證交所雲端 IP 封鎖。
+    """
+    if stock_input.isdigit(): 
+        return stock_input
+        
+    # FinMind 台灣股市資訊總表 API
+    url = "https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo"
+    
     try:
         response = requests.get(url, timeout=10)
-        for stock in response.json():
-            if stock.get('Name', '').strip() == stock_input.strip():
-                return stock.get('Code', '')
-    except: pass
+        data = response.json()
+        
+        # 確認 API 回傳狀態碼為 200 (成功)
+        if data.get('status') == 200:
+            stock_list = data.get('data', [])
+            
+            for stock in stock_list:
+                # 欄位名稱對應 FinMind 的格式：'stock_name' 與 'stock_id'
+                if stock.get('stock_name', '').strip() == stock_input.strip():
+                    return stock.get('stock_id', '')
+    except: 
+        pass
+        
     return None
 
 def fetch_twse_data(stock_no, target_date=None):

@@ -3,6 +3,7 @@ import requests
 import pandas as pd
 import time
 import plotly.graph_objects as go
+import yfinance as yf
 
 def get_stock_code(stock_input):
     if stock_input.isdigit(): return stock_input
@@ -15,22 +16,54 @@ def get_stock_code(stock_input):
     except: pass
     return None
 
-def fetch_twse_data(stock_no, year_month):
-    url = f"https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date={year_month}&stockNo={stock_no}"
-    headers = {"User-Agent": "Mozilla/5.0"}
+def fetch_twse_data(stock_no, target_date=None):
+    """
+    【引擎升級】改用 yfinance 繞過證交所雲端 IP 封鎖。
+    自動抓取近 3 個月資料，確保均線(MA)計算有足夠的歷史數據基底。
+    """
+    # 台股上市代碼必須加上後綴 .TW 才能在 Yahoo 系統中識別
+    ticker = f"{stock_no}.TW"
     try:
-        response = requests.get(url, headers=headers, timeout=10)
-        data = response.json()
-        if data.get('stat') == 'OK':
-            return pd.DataFrame(data['data'], columns=data['fields'])
-    except: pass
-    return None
+        # 下載近3個月歷史數據
+        df = yf.download(ticker, period="3mo", progress=False)
+        if df.empty:
+            return None
+            
+        # 整理 DataFrame 格式以完全相容我們原本的系統架構
+        df = df.reset_index()
+        
+        # 處理 yfinance 新版可能出現的多層級欄位
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+            
+        # 將英文欄位重新命名為中文，對接原有的繪圖與分析模組
+        df = df.rename(columns={
+            'Date': '日期',
+            'Open': '開盤價',
+            'High': '最高價',
+            'Low': '最低價',
+            'Close': '收盤價'
+        })
+        
+        # 轉換日期格式為字串
+        df['日期'] = df['日期'].dt.strftime('%Y%m%d')
+        
+        # 捨棄不需要的欄位，只回傳核心價格數據
+        return df[['日期', '開盤價', '最高價', '最低價', '收盤價']]
+        
+    except Exception as e:
+        print(f"yfinance 數據截獲失敗: {e}")
+        return None
 
 def process_and_analyze(df):
-    cols_to_clean = ['開盤價', '最高價', '最低價', '收盤價']
-    for col in cols_to_clean:
-        df[col] = df[col].str.replace(',', '').astype(float)
+    """
+    資料運算模組更新
+    """
+    # yfinance 回傳的已經是乾淨的數值型態，不再需要去逗號轉換字串
+    cols = ['開盤價', '最高價', '最低價', '收盤價']
+    df[cols] = df[cols].astype(float)
     
+    # 計算移動平均線
     df['MA5'] = df['收盤價'].rolling(window=5).mean()
     df['MA10'] = df['收盤價'].rolling(window=10).mean()
     return df

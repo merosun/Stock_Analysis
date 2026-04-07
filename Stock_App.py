@@ -17,14 +17,15 @@ def get_industry_mapping():
         data = response.json()
         if data.get('status') == 200:
             for stock in data.get('data', []):
-                category = stock.get('industry_category', '未分類')
+                category = stock.get('industry_category', '*未分類')
                 code = stock.get('stock_id', '')
-                
-                # 只抓取標準 4 碼的上市櫃股票，過濾掉權證與牛熊證
+                name = stock.get('stock_name', '') # 取得中文名稱
+
+                # 只抓取標準 64 碼的上市櫃股票，過濾掉權證與牛熊證
                 if len(code) == 4 and code.isdigit():
                     if category not in industry_dict:
-                        industry_dict[category] = []
-                    industry_dict[category].append(code)
+                        industry_dict[category] = {} # 改用字典存儲
+                    industry_dict[category][code] = name # 建立 ID -> Name 的映射
     except Exception as e:
         st.error(f"獲取產業清單失敗: {e}")
         
@@ -214,29 +215,27 @@ with tab1:
                 st.error("找不到該股票，請確認名稱是否正確。")
 
 # ==========================================
-# 標籤頁二：全自動板塊掃描引擎 (API 動態更新版)
+# 標籤頁二：全自動板塊掃描引擎 (含中文名稱與序號優化)
 # ==========================================
 with tab2:
     st.markdown("### 🔍 產業板塊掃描器")
     
-    # 呼叫 API 獲取即時分類
     INDUSTRY_STOCKS = get_industry_mapping()
     
     if not INDUSTRY_STOCKS:
-        st.warning("目前無法從 API 獲取產業分類，請稍後再試。")
+        st.warning("無法獲取產業分類。")
     else:
-        # 下拉選單現在位於 tab 內，切換時不會導致整個區塊消失
         selected_industry = st.selectbox("請選擇要掃描的資金板塊：", list(INDUSTRY_STOCKS.keys()))
-        stock_count = len(INDUSTRY_STOCKS[selected_industry])
+        
+        # 取得該板塊下「代碼對名稱」的字典
+        current_sector_map = INDUSTRY_STOCKS[selected_industry]
+        watch_list = list(current_sector_map.keys()) # 所有的代碼
+        stock_count = len(watch_list)
         st.caption(f"該板塊目前共收錄 {stock_count} 檔標的")
         
-        # 執行批次掃描的獨立按鈕
         if st.button(f"🚀 開始掃描【{selected_industry}】", use_container_width=True):
-            with st.spinner(f'正在調閱 {stock_count} 檔標的之歷史籌碼與價格型態...'):
-                
-                watch_list = INDUSTRY_STOCKS[selected_industry]
+            with st.spinner('掃描運算中...'):
                 tickers = [f"{code}.TW" for code in watch_list]
-
                 try:
                     data = yf.download(tickers, period="1mo", group_by='ticker', progress=False)
                     
@@ -244,11 +243,11 @@ with tab2:
                     for code in watch_list:
                         ticker_tw = f"{code}.TW"
                         
+                        # 數據處理邏輯 (與先前相同)
                         if len(watch_list) == 1:
                             df = data.copy()
                         else:
-                            if ticker_tw not in data.columns.get_level_values(0).unique():
-                                continue
+                            if ticker_tw not in data.columns.get_level_values(0).unique(): continue
                             df = data[ticker_tw].copy()
                             
                         df = df.dropna()
@@ -265,6 +264,7 @@ with tab2:
                         if is_low_price and is_high_vol:
                             results.append({
                                 "股票代碼": code,
+                                "股票名稱": current_sector_map[code], # 從映射表中取出名稱
                                 "最新收盤價": round(latest_close, 2),
                                 "20日最低價": round(lowest_20d, 2),
                                 "今日成交量": f"{int(latest_vol):,}",
@@ -272,10 +272,16 @@ with tab2:
                             })
 
                     if results:
-                        st.success(f"🎯 掃描完成！在【{selected_industry}】中發現 {len(results)} 檔符合『底部出量』型態：")
-                        st.dataframe(pd.DataFrame(results), use_container_width=True)
+                        st.success(f"🎯 發現 {len(results)} 檔符合型態標的：")
+                        
+                        # --- 序號優化處理 ---
+                        final_df = pd.DataFrame(results)
+                        # 將索引設為從 1 開始
+                        final_df.index = range(1, len(final_df) + 1) 
+                        
+                        st.dataframe(final_df, use_container_width=True)
                     else:
-                        st.info(f"平靜無波。目前【{selected_industry}】內無底部爆量訊號。")
+                        st.info(f"【{selected_industry}】目前無底部爆量訊號。")
 
                 except Exception as e:
-                    st.error(f"掃描引擎發生異常: {e}")
+                    st.error(f"掃描引擎異常: {e}")

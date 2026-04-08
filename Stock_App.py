@@ -61,41 +61,49 @@ def get_stock_code(stock_input):
 
 def fetch_twse_data(stock_no, target_date=None):
     """
-    【引擎升級】改用 yfinance 繞過證交所雲端 IP 封鎖。
-    自動抓取近 3 個月資料，確保均線(MA)計算有足夠的歷史數據基底。
+    智能數據截獲引擎：具備自動雙軌切換 (上市 .TW -> 上櫃 .TWO) 容錯機制
     """
-    # 台股上市代碼必須加上後綴 .TW 才能在 Yahoo 系統中識別
+    # 預設使用上市市場代碼
     ticker = f"{stock_no}.TW"
+    
     try:
-        # 下載近3個月歷史數據
+        # 第一階段：嘗試截獲上市市場數據
         df = yf.download(ticker, period="3mo", progress=False)
+        
+        # 第二階段：若查無上市資料，系統自動切換至上櫃市場進行重試
         if df.empty:
-            return None
+            ticker = f"{stock_no}.TWO"
+            df = yf.download(ticker, period="3mo", progress=False)
             
-        # 整理 DataFrame 格式以完全相容我們原本的系統架構
+            # 若雙市場皆查無該檔股票的交易紀錄，則判定為無效標的
+            if df.empty:
+                return None
+                
+        # --- 數據標準化與清洗處理 ---
         df = df.reset_index()
         
-        # 處理 yfinance 新版可能出現的多層級欄位
+        # 處理 yfinance 可能產生的多層級索引 (MultiIndex)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
             
-        # 將英文欄位重新命名為中文，對接原有的繪圖與分析模組
+        # 欄位中文化，對接終端機的繪圖與分析模組
         df = df.rename(columns={
             'Date': '日期',
             'Open': '開盤價',
             'High': '最高價',
             'Low': '最低價',
-            'Close': '收盤價'
+            'Close': '收盤價',
+            'Volume': '成交股數'
         })
         
-        # 轉換日期格式為字串
+        # 轉換日期格式以符合系統規範
         df['日期'] = df['日期'].dt.strftime('%Y%m%d')
         
-        # 捨棄不需要的欄位，只回傳核心價格數據
-        return df[['日期', '開盤價', '最高價', '最低價', '收盤價']]
+        # 僅回傳量化分析所需之核心價格與籌碼數據
+        return df[['日期', '開盤價', '最高價', '最低價', '收盤價', '成交股數']]
         
     except Exception as e:
-        print(f"yfinance 數據截獲失敗: {e}")
+        print(f"yfinance 數據截獲失敗 ({ticker}): {e}")
         return None
 
 def process_and_analyze(df):

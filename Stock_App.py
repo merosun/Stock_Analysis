@@ -10,9 +10,9 @@ from datetime import datetime
 # 核心資料截獲模組 (API & 爬蟲引擎)
 # ==========================================
 
-@st.cache_data(ttl=86400) # 快取 24 小時，減輕伺服器負擔
+@st.cache_data(ttl=86400)
 def get_industry_mapping():
-    """從 FinMind 動態獲取台股全市場分類清單，並建立 [代碼 -> 名稱] 的對照表"""
+    """從 FinMind 動態獲取台股全市場分類清單"""
     url = "https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo"
     industry_dict = {}
     
@@ -25,7 +25,6 @@ def get_industry_mapping():
                 code = stock.get('stock_id', '')
                 name = stock.get('stock_name', '')
                 
-                # 只抓取標準 4 碼的上市櫃現貨股票
                 if len(code) == 4 and code.isdigit():
                     if category not in industry_dict:
                         industry_dict[category] = {}
@@ -56,10 +55,8 @@ def fetch_twse_data(stock_no, target_date=None):
     """智能數據截獲引擎：具備自動雙軌切換 (上市 .TW -> 上櫃 .TWO) 容錯機制"""
     ticker = f"{stock_no}.TW"
     try:
-        # 第一階段：嘗試上市市場
         df = yf.download(ticker, period="3mo", progress=False)
         
-        # 第二階段：若查無資料，自動切換至上櫃市場
         if df.empty:
             ticker = f"{stock_no}.TWO"
             df = yf.download(ticker, period="3mo", progress=False)
@@ -67,7 +64,6 @@ def fetch_twse_data(stock_no, target_date=None):
             if df.empty:
                 return None
                 
-        # 數據標準化
         df = df.reset_index()
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
@@ -83,6 +79,33 @@ def fetch_twse_data(stock_no, target_date=None):
     except Exception as e:
         print(f"yfinance 數據截獲失敗 ({ticker}): {e}")
         return None
+
+def get_stock_fundamentals(stock_code):
+    """
+    獲取公司基本面資料 (產業板塊與主營業務)
+    完全自動化透過 yfinance 取得，捨棄手動維護清單。
+    """
+    try:
+        ticker = yf.Ticker(f"{stock_code}.TW")
+        info = ticker.info
+        
+        # 自動容錯：如果上市找不到，試試上櫃
+        if not info or 'sector' not in info:
+            ticker = yf.Ticker(f"{stock_code}.TWO")
+            info = ticker.info
+            
+        if not info or 'sector' not in info:
+            return None
+            
+        return {
+            "industry": f"{info.get('sector', '未分類')} / {info.get('industry', '未分類')}",
+            # yfinance 提供的簡介通常為英文，此為國際量化端標準格式
+            "business": info.get("longBusinessSummary", "暫無業務簡介資料。")
+        }
+    except Exception as e:
+        print(f"基本面資料獲取失敗: {e}")
+        return None
+
 
 # ==========================================
 # 策略運算與分析模組
@@ -107,14 +130,13 @@ def generate_trend_report(df):
     latest = df_sorted.iloc[-1]
     prev = df_sorted.iloc[-2]
 
-    # 提取數據
     close = latest['收盤價']
     ma5, prev_ma5 = latest['MA5'], prev['MA5']
     ma10, prev_ma10 = latest['MA10'], prev['MA10']
-    vol_latest = latest['成交股數'] / 1000  # 換算為張
-    vol_ma5 = latest['Vol_MA5'] / 1000      # 換算為張
+    vol_latest = latest['成交股數'] / 1000  
+    vol_ma5 = latest['Vol_MA5'] / 1000      
 
-    # 1. 量能判定 (流動性控管)
+    # 1. 量能判定
     if vol_ma5 < 500:
         vol_status = "⚠️ 流動性低迷"
         vol_advice = f"近5日均量僅 {vol_ma5:.0f} 張。籌碼流動性極差，容易產生滑價風險或遭主力控盤，建議避開此類標的。"
@@ -190,7 +212,6 @@ with tab1:
     with col1:
         user_input = st.text_input("輸入股票名稱或代碼", "台積電")
     with col2:
-        # 自動獲取當天日期做為預設值
         today_str = datetime.now().strftime("%Y%m%d")
         target_date = st.text_input("輸入查詢年月 (YYYYMMDD) - 預設為今日", today_str)
 
@@ -199,6 +220,7 @@ with tab1:
             stock_code = get_stock_code(user_input)
             if stock_code:
                 time.sleep(1) 
+                
                 raw_df = fetch_twse_data(stock_code, target_date)
                 
                 if raw_df is not None:
@@ -209,6 +231,16 @@ with tab1:
                     elif alert_color == "error": st.error(report_md)
                     elif alert_color == "warning": st.warning(report_md)
                     else: st.info(report_md)
+
+                    # ==========================================
+                    # 顯示基本面資訊面板 (已精簡)
+                    # ==========================================
+                    fund_info = get_stock_fundamentals(stock_code)
+                    if fund_info:
+                        with st.expander(f"📖 【{user_input}】公司基本面資訊", expanded=True):
+                            st.markdown(f"**🏢 產業結構：** {fund_info['industry']}")
+                            st.markdown(f"**📝 主要業務：** {fund_info['business']}")
+                    # ==========================================
 
                     chart = plot_candlestick(analyzed_df, user_input)
                     st.plotly_chart(chart, use_container_width=True)
@@ -239,7 +271,6 @@ with tab2:
         if st.button(f"🚀 開始掃描【{selected_industry}】", use_container_width=True):
             with st.spinner('掃描運算中 (自動過濾上市與上櫃資料)...'):
                 
-                # 建立雙市場代碼清單，進行批次大網撈魚
                 tickers_tw = [f"{code}.TW" for code in watch_list]
                 tickers_two = [f"{code}.TWO" for code in watch_list]
                 all_tickers = tickers_tw + tickers_two 
@@ -253,7 +284,6 @@ with tab2:
                         ticker_two = f"{code}.TWO"
                         df = None
                         
-                        # 動態判斷 API 抓到了上市還是上櫃的資料
                         if isinstance(data.columns, pd.MultiIndex):
                             available_tickers = data.columns.get_level_values(0).unique()
                             if ticker_tw in available_tickers:
@@ -269,13 +299,11 @@ with tab2:
                         df = df.dropna()
                         if len(df) < 20: continue 
 
-                        # 策略運算取值
                         latest_close = float(df['Close'].iloc[-1])
                         lowest_20d = float(df['Low'].rolling(window=20).min().iloc[-1])
                         latest_vol = float(df['Volume'].iloc[-1])
                         avg_vol_5d = float(df['Volume'].iloc[-6:-1].mean())
 
-                        # 核心選股邏輯：底部 & 爆量
                         is_low_price = latest_close <= (lowest_20d * 1.05)
                         is_high_vol = latest_vol > (avg_vol_5d * 2) if avg_vol_5d > 0 else False
 
@@ -292,7 +320,7 @@ with tab2:
                     if results:
                         st.success(f"🎯 發現 {len(results)} 檔符合『底部出量』型態標的：")
                         final_df = pd.DataFrame(results)
-                        final_df.index = range(1, len(final_df) + 1) # 序號從 1 開始
+                        final_df.index = range(1, len(final_df) + 1)
                         st.dataframe(final_df, use_container_width=True)
                     else:
                         st.info(f"平靜無波。目前【{selected_industry}】內無底部爆量訊號。")

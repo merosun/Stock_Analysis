@@ -12,9 +12,10 @@ from datetime import datetime
 
 @st.cache_data(ttl=86400)
 def get_industry_mapping():
-    """從 FinMind 動態獲取台股全市場分類清單"""
+    """從 FinMind 獲取台股全市場清單，並建立索引以供快速查詢"""
     url = "https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo"
     industry_dict = {}
+    lookup_table = {} 
     
     try:
         response = requests.get(url, timeout=10)
@@ -24,45 +25,40 @@ def get_industry_mapping():
                 category = stock.get('industry_category', '*未分類')
                 code = stock.get('stock_id', '')
                 name = stock.get('stock_name', '')
+                market_type = stock.get('type', 'twse')
                 
                 if len(code) == 4 and code.isdigit():
                     if category not in industry_dict:
                         industry_dict[category] = {}
                     industry_dict[category][code] = name
+                    
+                    lookup_table[code] = {
+                        "name": name,
+                        "category": category,
+                        "type": "上市" if market_type == "twse" else "上櫃"
+                    }
     except Exception as e:
         st.error(f"獲取產業清單失敗: {e}")
         
-    return {k: v for k, v in sorted(industry_dict.items()) if v}
+    sorted_industry = {k: v for k, v in sorted(industry_dict.items()) if v}
+    return sorted_industry, lookup_table
 
 def get_stock_code(stock_input):
-    """將使用者輸入的中文名稱轉換為股票代碼"""
-    if stock_input.isdigit(): 
-        return stock_input
-        
-    url = "https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo"
-    try:
-        response = requests.get(url, timeout=10)
-        data = response.json()
-        if data.get('status') == 200:
-            for stock in data.get('data', []):
-                if stock.get('stock_name', '').strip() == stock_input.strip():
-                    return stock.get('stock_id', '')
-    except: 
-        pass
+    if stock_input.isdigit(): return stock_input
+    _, lookup = get_industry_mapping()
+    for code, info in lookup.items():
+        if info['name'].strip() == stock_input.strip():
+            return code
     return None
 
 def fetch_twse_data(stock_no, target_date=None):
-    """智能數據截獲引擎：具備自動雙軌切換 (上市 .TW -> 上櫃 .TWO) 容錯機制"""
     ticker = f"{stock_no}.TW"
     try:
         df = yf.download(ticker, period="3mo", progress=False)
-        
         if df.empty:
             ticker = f"{stock_no}.TWO"
             df = yf.download(ticker, period="3mo", progress=False)
-            
-            if df.empty:
-                return None
+            if df.empty: return None
                 
         df = df.reset_index()
         if isinstance(df.columns, pd.MultiIndex):
@@ -73,103 +69,74 @@ def fetch_twse_data(stock_no, target_date=None):
             'Low': '最低價', 'Close': '收盤價', 'Volume': '成交股數'
         })
         df['日期'] = df['日期'].dt.strftime('%Y%m%d')
-        
         return df[['日期', '開盤價', '最高價', '最低價', '收盤價', '成交股數']]
-        
-    except Exception as e:
-        print(f"yfinance 數據截獲失敗 ({ticker}): {e}")
+    except:
         return None
 
-def get_stock_fundamentals(stock_code):
+def get_stock_fundamentals(stock_code, lookup_table):
     """
-    獲取公司基本面資料 (產業板塊與主營業務)
-    完全自動化透過 yfinance 取得，捨棄手動維護清單。
+    優先從 FinMind 緩存讀取產業，再嘗試從 Yahoo 爬取業務描述。
+    保障網頁在 yfinance 阻擋時依然能顯示基本架構。
     """
+    base_info = lookup_table.get(stock_code, {"category": "未知", "type": "未知"})
+    
+    result = {
+        "industry": base_info['category'],
+        "market": base_info['type'],
+        "business": "無法從 Yahoo Finance 取得詳細簡介（可能受限於 IP 封鎖或個股資料未登錄）。"
+    }
+
     try:
-        ticker = yf.Ticker(f"{stock_code}.TW")
+        suffix = ".TW" if base_info['type'] == "上市" else ".TWO"
+        ticker = yf.Ticker(f"{stock_code}{suffix}")
         info = ticker.info
         
-        # 自動容錯：如果上市找不到，試試上櫃
-        if not info or 'sector' not in info:
-            ticker = yf.Ticker(f"{stock_code}.TWO")
-            info = ticker.info
-            
-        if not info or 'sector' not in info:
-            return None
-            
-        return {
-            "industry": f"{info.get('sector', '未分類')} / {info.get('industry', '未分類')}",
-            # yfinance 提供的簡介通常為英文，此為國際量化端標準格式
-            "business": info.get("longBusinessSummary", "暫無業務簡介資料。")
-        }
-    except Exception as e:
-        print(f"基本面資料獲取失敗: {e}")
-        return None
-
+        if info and 'longBusinessSummary' in info:
+            result["business"] = info.get("longBusinessSummary")
+    except:
+        pass 
+        
+    return result
 
 # ==========================================
 # 策略運算與分析模組
 # ==========================================
 
 def process_and_analyze(df):
-    """計算價格均線與籌碼均量"""
     cols = ['開盤價', '最高價', '最低價', '收盤價', '成交股數']
     df[cols] = df[cols].astype(float)
-    
     df['MA5'] = df['收盤價'].rolling(window=5).mean()
     df['MA10'] = df['收盤價'].rolling(window=10).mean()
     df['Vol_MA5'] = df['成交股數'].rolling(window=5).mean()
     return df
 
 def generate_trend_report(df):
-    """專業趨勢判定與量能策略生成器"""
     df_sorted = df.sort_values(by='日期', ascending=True).dropna(subset=['MA10', 'Vol_MA5'])
-    if len(df_sorted) < 2:
-        return "⚠️ 資料天數不足，無法產生具參考價值的評語。", "warning"
+    if len(df_sorted) < 2: return "⚠️ 資料天數不足，無法產生具參考價值的評語。", "warning"
 
     latest = df_sorted.iloc[-1]
     prev = df_sorted.iloc[-2]
+    close, ma5, ma10 = latest['收盤價'], latest['MA5'], latest['MA10']
+    vol_latest, vol_ma5 = latest['成交股數'] / 1000, latest['Vol_MA5'] / 1000
 
-    close = latest['收盤價']
-    ma5, prev_ma5 = latest['MA5'], prev['MA5']
-    ma10, prev_ma10 = latest['MA10'], prev['MA10']
-    vol_latest = latest['成交股數'] / 1000  
-    vol_ma5 = latest['Vol_MA5'] / 1000      
-
-    # 1. 量能判定
     if vol_ma5 < 500:
-        vol_status = "⚠️ 流動性低迷"
-        vol_advice = f"近5日均量僅 {vol_ma5:.0f} 張。籌碼流動性極差，容易產生滑價風險或遭主力控盤，建議避開此類標的。"
+        vol_status, vol_advice, color_v = "⚠️ 流動性低迷", "流動性不足，避開殭屍股。", "warning"
     elif vol_latest > (vol_ma5 * 2) and vol_ma5 > 0:
-        vol_status = "🔥 異常爆量表態"
-        vol_advice = f"今日成交量達 {vol_latest:.0f} 張，突破5日均量兩倍以上。顯示有主力資金進駐或換手跡象，量能充沛。"
+        vol_status, vol_advice, color_v = "🔥 異常爆量表態", "主力換手或資金進駐，量能充沛。", "success"
     else:
-        vol_status = "🌊 量能健康穩定"
-        vol_advice = f"今日成交量 {vol_latest:.0f} 張，維持在近期常態水準，適合依循技術面操作。"
+        vol_status, vol_advice, color_v = "🌊 量能健康穩定", "流動性穩定，適合依技術面操作。", "info"
 
-    # 2. 價格趨勢判定
     if prev_ma5 <= prev_ma10 and ma5 > ma10:
-        trend = "🌟 黃金交叉成型"
-        price_advice = "短期均線向上突破長期均線，此為波段起漲的強烈買點訊號。"
-        color = "success"
+        trend, price_advice, color_p = "🌟 黃金交叉成型", "波段起漲強烈買點，觀察量能。", "success"
     elif prev_ma5 >= prev_ma10 and ma5 < ma10:
-        trend = "⚠️ 死亡交叉成型"
-        price_advice = "短期均線向下掼破長期均線，趨勢已轉弱，建議嚴格執行停損或大幅減碼。"
-        color = "error"
+        trend, price_advice, color_p = "⚠️ 死亡交叉成型", "趨勢轉弱，建議嚴格執行停損。", "error"
     elif close > ma5 and ma5 > ma10:
-        trend = "📈 多頭排列強勢"
-        price_advice = "股價穩居均線之上，建議順勢操作，持股續抱。"
-        color = "info"
+        trend, price_advice, color_p = "📈 多頭排列強勢", "穩居均線之上，持股續抱。", "info"
     elif close < ma5 and ma5 < ma10:
-        trend = "📉 空頭排列弱勢"
-        price_advice = "股價遭均線沉重反壓，切忌貿然進場摸底，觀望為上策。"
-        color = "warning"
+        trend, price_advice, color_p = "📉 空頭排列弱勢", "均線沉重反壓，觀望為上策。", "warning"
     else:
-        trend = "⚖️ 區間震盪盤整"
-        price_advice = "均線糾結，多空方向未明，建議耐心等待帶量突破盤整區間。"
-        color = "info"
+        trend, price_advice, color_p = "⚖️ 區間震盪盤整", "多空方向未明，等待表態。", "info"
 
-    # 3. 組合報告
     report = f"""
     ### 📊 系統綜合評測
     #### 【價格面】 {trend}
@@ -183,10 +150,9 @@ def generate_trend_report(df):
     * **5日均量：** {vol_ma5:.0f} 張
     > **💡 策略：** {vol_advice}
     """
-    return report, color
+    return report, color_p
 
 def plot_candlestick(df, stock_name):
-    """繪製專業技術線圖"""
     fig = go.Figure()
     fig.add_trace(go.Candlestick(
         x=df['日期'], open=df['開盤價'], high=df['最高價'], low=df['最低價'], close=df['收盤價'],
@@ -197,14 +163,15 @@ def plot_candlestick(df, stock_name):
     fig.update_layout(title=f"{stock_name} 技術分析圖", yaxis_title="股價 (TWD)", xaxis_rangeslider_visible=False, template="plotly_dark")
     return fig
 
-
 # ==========================================
-# Web UI 介面設計 (雙標籤頁架構)
+# Web UI 介面設計
 # ==========================================
 st.set_page_config(layout="wide", page_title="量化交易終端機")
-st.title("📈 量化交易終端機 - 智能評估版")
+st.title("📈 量化交易終端機 - 專業操盤版")
 
 tab1, tab2 = st.tabs(["📊 單檔智能分析", "🚀 板塊爆量掃描"])
+
+INDUSTRY_STOCKS, LOOKUP_TABLE = get_industry_mapping()
 
 # --- 標籤頁一：單檔智能分析 ---
 with tab1:
@@ -226,21 +193,17 @@ with tab1:
                 if raw_df is not None:
                     analyzed_df = process_and_analyze(raw_df.copy())
                     
+                    # 基本面資訊面板
+                    fund_info = get_stock_fundamentals(stock_code, LOOKUP_TABLE)
+                    with st.expander(f"📖 【{user_input}】公司基本面資訊", expanded=True):
+                        st.markdown(f"**🏢 產業結構：** {fund_info['industry']} ({fund_info['market']})")
+                        st.markdown(f"**📝 業務簡介：**\n> {fund_info['business']}")
+
                     report_md, alert_color = generate_trend_report(analyzed_df)
                     if alert_color == "success": st.success(report_md)
                     elif alert_color == "error": st.error(report_md)
                     elif alert_color == "warning": st.warning(report_md)
                     else: st.info(report_md)
-
-                    # ==========================================
-                    # 顯示基本面資訊面板 (已精簡)
-                    # ==========================================
-                    fund_info = get_stock_fundamentals(stock_code)
-                    if fund_info:
-                        with st.expander(f"📖 【{user_input}】公司基本面資訊", expanded=True):
-                            st.markdown(f"**🏢 產業結構：** {fund_info['industry']}")
-                            st.markdown(f"**📝 主要業務：** {fund_info['business']}")
-                    # ==========================================
 
                     chart = plot_candlestick(analyzed_df, user_input)
                     st.plotly_chart(chart, use_container_width=True)
@@ -248,15 +211,13 @@ with tab1:
                     analyzed_df = analyzed_df.sort_values(by='日期', ascending=False)
                     st.dataframe(analyzed_df, use_container_width=True) 
                 else:
-                    st.error("查無數據，請確認該標的近期是否有交易，或代碼是否正確。")
+                    st.error("查無技術面數據，請確認該標的近期是否有交易。")
             else:
                 st.error("找不到該股票，請確認名稱是否正確。")
 
 # --- 標籤頁二：板塊爆量掃描 ---
 with tab2:
     st.markdown("### 🔍 產業板塊掃描器")
-    
-    INDUSTRY_STOCKS = get_industry_mapping()
     
     if not INDUSTRY_STOCKS:
         st.warning("目前無法從 API 獲取產業分類，請稍後再試。")
@@ -320,7 +281,7 @@ with tab2:
                     if results:
                         st.success(f"🎯 發現 {len(results)} 檔符合『底部出量』型態標的：")
                         final_df = pd.DataFrame(results)
-                        final_df.index = range(1, len(final_df) + 1)
+                        final_df.index = range(1, len(final_df) + 1) 
                         st.dataframe(final_df, use_container_width=True)
                     else:
                         st.info(f"平靜無波。目前【{selected_industry}】內無底部爆量訊號。")

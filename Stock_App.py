@@ -116,8 +116,12 @@ def generate_trend_report(df):
 
     latest = df_sorted.iloc[-1]
     prev = df_sorted.iloc[-2]
+    
+    # === 修正點在這裡：補上 prev_ma5 與 prev_ma10 的取值 ===
     close, ma5, ma10 = latest['收盤價'], latest['MA5'], latest['MA10']
+    prev_ma5, prev_ma10 = prev['MA5'], prev['MA10'] 
     vol_latest, vol_ma5 = latest['成交股數'] / 1000, latest['Vol_MA5'] / 1000
+    # ========================================================
 
     if vol_ma5 < 500:
         vol_status, vol_advice, color_v = "⚠️ 流動性低迷", "流動性不足，避開殭屍股。", "warning"
